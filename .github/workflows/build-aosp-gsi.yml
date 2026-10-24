@@ -1,0 +1,88 @@
+name: Build genuine AOSP GSI
+
+on:
+  workflow_dispatch:
+    inputs:
+      android_branch:
+        description: "Official AOSP manifest branch"
+        required: true
+        default: android17-release
+        type: choice
+        options: [android17-release, android16-release]
+      architecture:
+        description: "GSI CPU architecture"
+        required: true
+        default: arm64
+        type: choice
+        options: [arm64, x86_64, arm, x86]
+      variant:
+        description: "AOSP build variant"
+        required: true
+        default: userdebug
+        type: choice
+        options: [userdebug, user]
+      publish_release:
+        description: "Publish the successful build on GitHub Releases"
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: overworld-aosp-${{ inputs.android_branch }}-${{ inputs.architecture }}
+  cancel-in-progress: false
+
+jobs:
+  build-gsi:
+    # AOSP needs approximately 400 GB free and 64 GB RAM.
+    # Register an x86_64 Linux self-hosted runner labelled overworld-large.
+    runs-on: [self-hosted, linux, x64, overworld-large]
+    timeout-minutes: 360
+    steps:
+      - name: Checkout OverworldGSI
+        uses: actions/checkout@v4
+
+      - name: Confirm builder script syntax
+        run: bash -n scripts/build_aosp_gsi.sh
+
+      - name: Build Android GSI from source
+        env:
+          AOSP_BRANCH: ${{ inputs.android_branch }}
+          AOSP_TARGET: gsi_${{ inputs.architecture }}-${{ inputs.variant }}
+          AOSP_WORKDIR: ${{ runner.temp }}/overworld-aosp
+          DIST_DIR: ${{ github.workspace }}/dist
+          SYNC_JOBS: "4"
+          BUILD_JOBS: "4"
+        run: bash scripts/build_aosp_gsi.sh
+
+      - name: Verify release contents and hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c -- *.xz.sha256
+          python3 -m json.tool build-info.json >/dev/null
+          test -s source-manifest.xml
+          for image in *.img.xz; do test -s "$image"; done
+
+      - name: Publish a GitHub release
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="aosp-${{ inputs.android_branch }}-${{ inputs.architecture }}-${{ github.run_number }}"
+          files=(dist/*.img.xz dist/*.sha256 dist/build-info.json dist/source-manifest.xml)
+          for file in "${files[@]}"; do
+            test -s "$file"
+            test "$(stat -c%s "$file")" -lt 2147483648 || {
+              echo "::error::GitHub release asset exceeds 2 GiB: $file"; exit 1;
+            }
+          done
+          gh release create "$tag" "${files[@]}" \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "OverworldGSI AOSP ${{ inputs.android_branch }} ${{ inputs.architecture }}" \
+            --notes "AOSP source-compiled GSI. No individual-device boot, CTS or VTS compatibility is implied. See build-info.json and source-manifest.xml."
