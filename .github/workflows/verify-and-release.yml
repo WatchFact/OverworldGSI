@@ -1,0 +1,58 @@
+name: OverworldGSI verification and previews
+
+on:
+  push:
+    branches:
+      - main
+      - feature/extraction-integrity-v1
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Configure Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install development dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Verify Python syntax
+        run: python -m compileall -q cli.py make.py tools tests
+
+      - name: Lint changed extraction code
+        run: python -m ruff check tools/extractor/archive.py tools/extractor/postprocess.py tools/extractor/formats/payload.py tests
+
+      - name: Run extraction regression tests
+        run: python -m unittest discover -s tests -v
+
+  release:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Publish tagged source preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_TAG: v0.1.0-preview.${{ github.run_number }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          gh release create "$BUILD_TAG" \
+            --target "$COMMIT_SHA" \
+            --title "OverworldGSI $BUILD_TAG" \
+            --notes "Verified source preview. Firmware compatibility depends on hardware, vendor implementation and Treble support. This release is not a device-tested bootable image." \
+            --prerelease
