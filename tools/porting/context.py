@@ -55,6 +55,7 @@ class PatchContext:
     rom_type: str = "auto"
     override_rom_type: str = "default"
     debloat: bool = True
+    insecure_adb: bool = False
     props: dict[str, SettingsProp] = field(default_factory=dict)
     info: DeviceInfo = field(default_factory=DeviceInfo)
     is_64bit_only: bool = False
