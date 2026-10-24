@@ -28,7 +28,8 @@ def run(ctx: PatchContext) -> None:
     patch_ramdisk(ctx)
     patch_selinux(ctx)
     vendors.run_hook(ctx, "patch_frameworks")
-    force_enable_usb_debugging(ctx)
+    if ctx.insecure_adb:
+        force_enable_usb_debugging(ctx)
 
     vendor = ctx.partition_dirs.get("vendor")
     if vendor:

@@ -94,6 +94,7 @@ class RomPorter:
         self.is_64bit_only = False
         self.programs_32bit_only = []
         self.debloat = True
+        self.insecure_adb = False
         self.no_merge = False
         self.image_partitions = ["system"]
         self.output_images = {}
@@ -252,6 +253,7 @@ class RomPorter:
         ctx.rom_type = self.rom_type
         ctx.override_rom_type = self.override_rom_type
         ctx.debloat = self.debloat
+        ctx.insecure_adb = self.insecure_adb
         ctx.patches_dir = patches_dir
         try:
             ctx.resolve_partitions()

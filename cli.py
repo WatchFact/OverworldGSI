@@ -164,6 +164,7 @@ def cmd_build(args):
         return 2
     wt.logger = ConsoleLogger()
     wt.debloat = not args.no_debloat
+    wt.insecure_adb = args.insecure_adb
     wt.no_merge = args.no_merge
     wt.avb_key = args.avb_key
 
@@ -342,6 +343,10 @@ def main():
         "--no-debloat",
         action="store_true",
         help="keep the apps the ROM's patch set would remove",
+    )
+    build.add_argument(
+        "--insecure-adb", action="store_true",
+        help="opt in to insecure debugging (legacy conversion; not recommended)",
     )
     build.set_defaults(func=cmd_build)
 

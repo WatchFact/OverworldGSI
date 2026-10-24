@@ -151,17 +151,42 @@ def _is_zstd(path: str) -> bool:
 
 
 def _finalize_image(img_path: str, dest_path: str, logger):
-    """Moves img_path to dest_path, decompressing or unsparsing on the way."""
+    """Convert to a real filesystem image; never keep compressed bytes on failure."""
     name = os.path.basename(dest_path)
-    if HAS_ZSTD and _is_zstd(img_path):
+    if _is_zstd(img_path):
+        if not HAS_ZSTD:
+            raise RuntimeError(
+                f"Cannot decompress {name}: install the zstandard package"
+            )
         if logger:
             logger(f"Decompressing zstd {name}...")
+        fd, decoded = tempfile.mkstemp(
+            prefix=".zstd-", suffix=".img", dir=os.path.dirname(dest_path)
+        )
+        raw = decoded + ".raw"
         try:
-            with open(img_path, "rb") as in_f, open(dest_path, "wb") as out_f:
-                zstandard.ZstdDecompressor().copy_stream(in_f, out_f)
+            with os.fdopen(fd, "wb") as output, open(img_path, "rb") as source:
+                try:
+                    zstandard.ZstdDecompressor().copy_stream(source, output)
+                except Exception as error:
+                    raise RuntimeError(
+                        f"Failed to decompress zstd image {name}: {error}"
+                    ) from error
+
+            if sparse.is_sparse(decoded):
+                if logger:
+                    logger(f"Unsparsing decompressed {name}...")
+                if not sparse.unsparse(decoded, raw):
+                    raise RuntimeError(
+                        f"Failed to unsparse decompressed image {name}"
+                    )
+                os.replace(raw, dest_path)
+            else:
+                os.replace(decoded, dest_path)
             _remove(img_path)
-        except Exception:
-            shutil.move(img_path, dest_path)
+        finally:
+            _remove(decoded)
+            _remove(raw)
     elif sparse.is_sparse(img_path):
         if logger:
             logger(f"Unsparsing {name}...")
