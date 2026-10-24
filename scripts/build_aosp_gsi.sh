@@ -65,9 +65,9 @@ if [[ ! -s "$system_image" ]]; then
 fi
 filename="OverworldGSI-${AOSP_BRANCH}-${AOSP_TARGET}-system.img"
 cp --sparse=always "$system_image" "$DIST_DIR/$filename"
-sha256sum "$DIST_DIR/$filename" > "$DIST_DIR/$filename.sha256"
+(cd "$DIST_DIR" && sha256sum "$filename" > "$filename.sha256")
 xz -T "$BUILD_JOBS" -6 -k "$DIST_DIR/$filename"
-sha256sum "$DIST_DIR/$filename.xz" > "$DIST_DIR/$filename.xz.sha256"
+(cd "$DIST_DIR" && sha256sum "$filename.xz" > "$filename.xz.sha256")
 repo manifest -r -o "$DIST_DIR/source-manifest.xml"
 python3 - "$DIST_DIR" "$filename" "$AOSP_BRANCH" "$AOSP_TARGET" <<'PY'
 import hashlib
