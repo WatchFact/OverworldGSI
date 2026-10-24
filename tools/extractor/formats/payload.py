@@ -2,9 +2,12 @@
 
 from typing import List, Optional, Set
 import bz2
+import hashlib
 import lzma
 import os
+import re
 import struct
+import tempfile
 
 try:
     import zstandard
@@ -30,6 +33,7 @@ OP_ZERO = 6
 OP_DISCARD = 7
 OP_REPLACE_XZ = 8
 FULL_OPS = {OP_REPLACE, OP_REPLACE_BZ, OP_REPLACE_XZ, OP_ZERO, OP_DISCARD}
+PARTITION_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
 
 
 class PayloadError(RuntimeError):
@@ -98,30 +102,78 @@ def _check_op(op, partition: str):
 
 
 def _extract_partition(f, part, out_path, data_offset, block_size):
+    """Write a verified partition atomically, never padding truncated OTA data."""
     for op in part.operations:
         _check_op(op, part.partition_name)
 
-    with open(out_path, "wb") as out_f:
-        end = 0
-        for op in part.operations:
-            for ext in op.dst_extents:
-                end = max(end, (ext.start_block + ext.num_blocks) * block_size)
-            # ZERO/DISCARD blocks are left as holes, which read as zeros.
-            if op.type in (OP_ZERO, OP_DISCARD):
-                continue
+    if block_size <= 0:
+        raise PayloadError("Invalid payload block size")
 
-            f.seek(data_offset + op.data_offset)
-            data = DECODERS[op.type](f.read(op.data_length))
-            pos = 0
-            for ext in op.dst_extents:
-                size = ext.num_blocks * block_size
-                out_f.seek(ext.start_block * block_size)
-                out_f.write(data[pos : pos + size].ljust(size, b"\x00"))
-                pos += size
+    fd, temporary = tempfile.mkstemp(
+        prefix=".payload-", suffix=".img", dir=os.path.dirname(out_path)
+    )
+    try:
+        with os.fdopen(fd, "wb") as out_f:
+            end = 0
+            for op in part.operations:
+                for ext in op.dst_extents:
+                    end = max(
+                        end, (ext.start_block + ext.num_blocks) * block_size
+                    )
+                if op.type in (OP_ZERO, OP_DISCARD):
+                    continue
 
-        if part.new_partition_info.size > 0:
-            end = part.new_partition_info.size
-        out_f.truncate(end)
+                f.seek(data_offset + op.data_offset)
+                encoded = f.read(op.data_length)
+                if len(encoded) != op.data_length:
+                    raise PayloadError(
+                        f"Truncated operation data in {part.partition_name}: "
+                        f"expected {op.data_length} bytes, got {len(encoded)}"
+                    )
+
+                if op.data_sha256_hash and (
+                    hashlib.sha256(encoded).digest() != op.data_sha256_hash
+                ):
+                    raise PayloadError(
+                        f"SHA-256 mismatch in {part.partition_name} payload data"
+                    )
+
+                try:
+                    data = DECODERS[op.type](encoded)
+                except (OSError, EOFError, ValueError) as error:
+                    raise PayloadError(
+                        f"Cannot decode {part.partition_name} operation: {error}"
+                    ) from error
+
+                expected = sum(
+                    ext.num_blocks * block_size for ext in op.dst_extents
+                )
+                if len(data) != expected:
+                    raise PayloadError(
+                        f"Unexpected operation size in {part.partition_name}: "
+                        f"expected {expected} bytes, got {len(data)}"
+                    )
+
+                pos = 0
+                for ext in op.dst_extents:
+                    size = ext.num_blocks * block_size
+                    out_f.seek(ext.start_block * block_size)
+                    out_f.write(data[pos : pos + size])
+                    pos += size
+
+            if part.new_partition_info.size > 0:
+                if end > part.new_partition_info.size:
+                    raise PayloadError(
+                        f"Payload operations exceed declared partition size "
+                        f"in {part.partition_name}"
+                    )
+                end = part.new_partition_info.size
+            out_f.truncate(end)
+
+        os.replace(temporary, out_path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
 
 
 def extract_payload(
@@ -182,6 +234,8 @@ def extract_payload(
 
         for part in manifest.partitions:
             name = part.partition_name
+            if not PARTITION_NAME.fullmatch(name):
+                raise PayloadError(f"Unsafe partition name in OTA: {name!r}")
             if targets is not None and name.lower() not in targets:
                 continue
 
