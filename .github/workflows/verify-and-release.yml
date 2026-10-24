@@ -32,8 +32,11 @@ jobs:
       - name: Verify Python syntax
         run: python -m compileall -q cli.py make.py tools tests
 
-      - name: Lint changed extraction code
-        run: python -m ruff check tools/extractor/archive.py tools/extractor/postprocess.py tools/extractor/formats/payload.py tests
+      - name: Validate source builder shell syntax
+        run: bash -n scripts/build_aosp_gsi.sh
+
+      - name: Lint changed extraction and smoke tests
+        run: python -m ruff check tools/extractor/archive.py tools/extractor/postprocess.py tools/extractor/formats/payload.py scripts/boot_smoke.py tests
 
       - name: Run extraction regression tests
         run: python -m unittest discover -s tests -v
