@@ -186,7 +186,7 @@ def _extract_tar(
 
 def _safe_archive_member(name: str) -> bool:
     """Reject absolute paths and parent traversal in 7z member names."""
-    normalized = name.replace("\\\\", "/")
+    normalized = name.replace("\\", "/")
     return (
         not normalized.startswith("/")
         and not re.match(r"^[A-Za-z]:", normalized)
