@@ -4,6 +4,7 @@ Archive extraction (ZIP, TAR, 7Z, RAR) with member filtering.
 
 from typing import Callable, List, Optional, Set
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -81,9 +82,9 @@ def extract_archive(
             pass
 
     if lower.endswith(".7z"):
-        return _extract_7z(archive_path, output_dir, filter_func)
+        return _extract_7z(archive_path, output_dir, filter_func, logger)
 
-    return _extract_host(archive_path, output_dir)
+    return _extract_host(archive_path, output_dir, filter_func, logger)
 
 
 def _claim(output_dir: str, member: str, claimed: Set[str], logger):
@@ -183,24 +184,68 @@ def _extract_tar(
     return extracted
 
 
+def _safe_archive_member(name: str) -> bool:
+    """Reject absolute paths and parent traversal in 7z member names."""
+    normalized = name.replace("\\\\", "/")
+    return (
+        not normalized.startswith("/")
+        and not re.match(r"^[A-Za-z]:", normalized)
+        and ".." not in normalized.split("/")
+    )
+
+
+def _collect_scratch(
+    scratch: str, output_dir: str, filter_func: Filter, logger=None
+) -> List[str]:
+    """Flatten a host extraction like ZIP/TAR; never copy symlink targets."""
+    extracted: List[str] = []
+    claimed: Set[str] = {
+        entry for entry in os.listdir(output_dir)
+        if os.path.isfile(os.path.join(output_dir, entry))
+    }
+    for root, dirs, files in os.walk(scratch, followlinks=False):
+        dirs[:] = [
+            d for d in dirs if not os.path.islink(os.path.join(root, d))
+        ]
+        for filename in sorted(files):
+            source = os.path.join(root, filename)
+            if os.path.islink(source) or not os.path.isfile(source):
+                continue
+            if filter_func and not filter_func(filename):
+                continue
+            target = _claim(output_dir, source, claimed, logger)
+            if target:
+                shutil.move(source, target)
+                extracted.append(target)
+    return extracted
+
+
 def _extract_7z(
-    seven_z_path: str, output_dir: str, filter_func: Filter = None
+    seven_z_path: str, output_dir: str, filter_func: Filter = None, logger=None
 ) -> List[str]:
     if HAS_PY7ZR:
         try:
-            with py7zr.SevenZipFile(seven_z_path, mode="r") as archive:
-                targets = [
-                    n
-                    for n in archive.getnames()
-                    if not filter_func or filter_func(os.path.basename(n))
-                ]
-                if targets:
-                    archive.extract(path=output_dir, targets=targets)
-            return [os.path.join(output_dir, t) for t in targets]
+            with tempfile.TemporaryDirectory(
+                prefix=".extract-", dir=output_dir
+            ) as scratch:
+                with py7zr.SevenZipFile(seven_z_path, mode="r") as seven_z:
+                    names = seven_z.getnames()
+                    if not all(_safe_archive_member(n) for n in names):
+                        raise RuntimeError("Unsafe path inside 7z archive")
+                    targets = [
+                        n for n in names
+                        if not filter_func or filter_func(os.path.basename(n))
+                    ]
+                    if targets:
+                        seven_z.extract(path=scratch, targets=targets)
+                return _collect_scratch(scratch, output_dir, filter_func, logger)
+        except RuntimeError:
+            raise
         except Exception:
+            # Unsupported 7z compression can be handled by a host extractor.
             pass
 
-    return _extract_host(seven_z_path, output_dir)
+    return _extract_host(seven_z_path, output_dir, filter_func, logger)
 
 
 def _host_extractors(archive_path: str):
@@ -222,11 +267,12 @@ def _host_extractors(archive_path: str):
     return seven_z + libarchive
 
 
-def _extract_host(archive_path: str, output_dir: str) -> List[str]:
+def _extract_host(
+    archive_path: str, output_dir: str, filter_func: Filter = None, logger=None
+) -> List[str]:
     """
-    Extracts with the first host tool that succeeds. Each attempt goes to
-    a scratch directory that is only moved into output_dir on success, so
-    a tool failing halfway leaves no truncated files behind.
+    Extract into a scratch directory; publish only regular selected files.
+    A failed tool leaves no partially extracted output behind.
     """
     tried = []
     for name, argv in _host_extractors(archive_path):
@@ -238,14 +284,7 @@ def _extract_host(archive_path: str, output_dir: str) -> List[str]:
                 stderr=subprocess.DEVNULL,
             ).returncode
             if rc == 0:
-                for entry in os.listdir(scratch):
-                    target = os.path.join(output_dir, entry)
-                    shutil.move(os.path.join(scratch, entry), target)
-                return [
-                    os.path.join(root, f)
-                    for root, _, files in os.walk(output_dir)
-                    for f in files
-                ]
+                return _collect_scratch(scratch, output_dir, filter_func, logger)
             tried.append(f"{name} (exit {rc})")
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
