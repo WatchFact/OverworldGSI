@@ -56,6 +56,74 @@ jobs:
           BUILD_JOBS: "4"
         run: bash scripts/build_aosp_gsi.sh
 
+      # A boot probe is possible on x86_64 using the emulator's -system override.
+      # This checks actual framework startup of *our* image, not a stock AVD.
+      - name: Install Android emulator tools
+        if: ${{ inputs.architecture == 'x86_64' }}
+        uses: android-actions/setup-android@v3
+
+      - name: Boot the newly built GSI in an emulator
+        if: ${{ inputs.architecture == 'x86_64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ inputs.android_branch }}" in
+            android17-release) api=37 ;;
+            android16-release) api=36 ;;
+            *) echo "::error::Unknown API for requested Android branch"; exit 2 ;;
+          esac
+          sdkmanager --install "platform-tools" "emulator" "system-images;android-$api;default;x86_64"
+          echo "no" | avdmanager create avd \
+            --force --name overworld-gsi-test \
+            --package "system-images;android-$api;default;x86_64"
+
+          # Verify image identity before passing it into the emulator.
+          image=(dist/*.img.xz)
+          test "${#image[@]}" -eq 1
+          xz --decompress --keep "${image[0]}"
+          candidate="${image[0]%.xz}"
+          (cd dist && sha256sum -c -- *.img.sha256)
+
+          # The AOSP builder generally emits a raw ext4 image, but handle
+          # sparse output without allowing a reference AVD image as a fallback.
+          if python3 - "$candidate" <<'PY'
+          import pathlib
+          import sys
+          raise SystemExit(
+              pathlib.Path(sys.argv[1]).open("rb").read(4)
+              != b"\x3a\xff\x26\xed"
+          )
+          PY
+          then
+            converter=""
+            if command -v simg2img >/dev/null; then
+              converter="$(command -v simg2img)"
+            elif test -x "${{ runner.temp }}/overworld-aosp/out/host/linux-x86/bin/simg2img"; then
+              converter="${{ runner.temp }}/overworld-aosp/out/host/linux-x86/bin/simg2img"
+            fi
+            if test -z "$converter"; then
+              echo "::error::Sparse GSI output requires the simg2img utility" >&2
+              exit 1
+            fi
+            "$converter" "$candidate" "$candidate.raw"
+            candidate="$candidate.raw"
+          fi
+
+          python3 scripts/boot_smoke.py \
+            --system-image "$candidate" \
+            --avd overworld-gsi-test \
+            --expected-sdk "$api" \
+            --timeout 900 \
+            --report boot-results/boot-smoke.json
+
+      - name: Upload boot probe evidence
+        if: ${{ always() && inputs.architecture == 'x86_64' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: overworld-gsi-boot-evidence
+          path: boot-results/
+          if-no-files-found: warn
+
       - name: Verify release contents and hashes
         shell: bash
         run: |
@@ -85,4 +153,4 @@ jobs:
           gh release create "$tag" "${files[@]}" \
             --target "$GITHUB_SHA" --prerelease \
             --title "OverworldGSI AOSP ${{ inputs.android_branch }} ${{ inputs.architecture }}" \
-            --notes "AOSP source-compiled GSI. No individual-device boot, CTS or VTS compatibility is implied. See build-info.json and source-manifest.xml."
+            --notes "AOSP source-compiled GSI. x86_64 variants require an Android emulator boot probe before publication; ARM images remain hardware-untested. No individual-device boot, CTS or VTS compatibility is implied. See build-info.json and source-manifest.xml."
