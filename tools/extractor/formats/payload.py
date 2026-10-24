@@ -131,16 +131,9 @@ def _extract_partition(f, part, out_path, data_offset, block_size):
                         f"expected {op.data_length} bytes, got {len(encoded)}"
                     )
 
-                if op.data_sha256_hash and (
-                    hashlib.sha256(encoded).digest() != op.data_sha256_hash
-                ):
-                    raise PayloadError(
-                        f"SHA-256 mismatch in {part.partition_name} payload data"
-                    )
-
                 try:
                     data = DECODERS[op.type](encoded)
-                except (OSError, EOFError, ValueError) as error:
+                except Exception as error:
                     raise PayloadError(
                         f"Cannot decode {part.partition_name} operation: {error}"
                     ) from error
@@ -169,6 +162,18 @@ def _extract_partition(f, part, out_path, data_offset, block_size):
                     )
                 end = part.new_partition_info.size
             out_f.truncate(end)
+
+        # The manifest can provide a whole-partition SHA-256 hash.
+        expected_hash = part.new_partition_info.hash
+        if len(expected_hash) == hashlib.sha256().digest_size:
+            digest = hashlib.sha256()
+            with open(temporary, "rb") as image:
+                for chunk in iter(lambda: image.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.digest() != expected_hash:
+                raise PayloadError(
+                    f"Partition SHA-256 mismatch for {part.partition_name}"
+                )
 
         os.replace(temporary, out_path)
     finally:
